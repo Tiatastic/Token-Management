@@ -1,7 +1,6 @@
 ;; Title: Advanced Fungible Token (AFT) for Stacks smart contract
 ;; Description: A robust token implementation with advanced features
 
-
 ;; Error Constants
 (define-constant ERR_OWNER_ONLY (err u100))
 (define-constant ERR_NOT_TOKEN_OWNER (err u101))
@@ -13,6 +12,9 @@
 (define-constant ERR_ZERO_ADDRESS (err u107))
 (define-constant ERR_INVALID_TOKEN_ID (err u108))
 (define-constant ERR_UNAUTHORIZED_ACCESS (err u109))
+
+;; Define response types
+(define-constant ERR_TRANSFER (err u200))
 
 ;; Constants
 (define-constant TOKEN_CONTRACT_OWNER tx-sender)
@@ -39,12 +41,12 @@
     (is-eq tx-sender TOKEN_CONTRACT_OWNER))
 
 (define-private (is-address-blacklisted (wallet-address principal))
-    (default-to false (get-address-blacklist-status wallet-address)))
+    (default-to false (map-get? blacklisted-addresses wallet-address)))
 
 (define-private (validate-token-transfer (sender-address principal) (transfer-amount uint))
     (and
         (not (is-address-blacklisted sender-address))
-        (>= (get-holder-balance sender-address) transfer-amount)
+        (>= (default-to u0 (map-get? token-holder-balances sender-address)) transfer-amount)
         (> transfer-amount u0)))
 
 ;; Read-Only Functions
@@ -80,20 +82,24 @@
 
 (define-public (transfer-tokens (recipient-address principal) (transfer-amount uint))
     (let ((sender-address tx-sender))
-        (asserts! (validate-token-transfer sender-address transfer-amount) ERR_INSUFFICIENT_BALANCE)
-        (asserts! (not (is-address-blacklisted recipient-address)) ERR_BLACKLISTED)
-        (asserts! (not (var-get contract-paused-state)) ERR_CONTRACT_PAUSED)
-        (try! (process-token-transfer sender-address recipient-address transfer-amount))
-        (ok true)))
+        (begin
+            (asserts! (validate-token-transfer sender-address transfer-amount) ERR_INSUFFICIENT_BALANCE)
+            (asserts! (not (is-address-blacklisted recipient-address)) ERR_BLACKLISTED)
+            (asserts! (not (var-get contract-paused-state)) ERR_CONTRACT_PAUSED)
+            (process-token-transfer sender-address recipient-address transfer-amount))))
 
 (define-public (transfer-tokens-from (owner-address principal) (recipient-address principal) (transfer-amount uint))
     (let ((spender-address tx-sender))
-        (asserts! (validate-token-transfer owner-address transfer-amount) ERR_INSUFFICIENT_BALANCE)
-        (asserts! (not (is-address-blacklisted recipient-address)) ERR_BLACKLISTED)
-        (asserts! (not (var-get contract-paused-state)) ERR_CONTRACT_PAUSED)
-        (try! (decrease-spending-allowance owner-address spender-address transfer-amount))
-        (try! (process-token-transfer owner-address recipient-address transfer-amount))
-        (ok true)))
+        (begin
+            (asserts! (validate-token-transfer owner-address transfer-amount) ERR_INSUFFICIENT_BALANCE)
+            (asserts! (not (is-address-blacklisted recipient-address)) ERR_BLACKLISTED)
+            (asserts! (not (var-get contract-paused-state)) ERR_CONTRACT_PAUSED)
+            (asserts! (>= (default-to u0 (map-get? token-spending-allowances {token-owner: owner-address, authorized-spender: spender-address})) transfer-amount) ERR_INSUFFICIENT_BALANCE)
+            (match (decrease-spending-allowance owner-address spender-address transfer-amount)
+                success (if success
+                    (process-token-transfer owner-address recipient-address transfer-amount)
+                    ERR_TRANSFER)
+                error (err error)))))
 
 (define-public (approve-token-spender (authorized-spender principal) (approved-amount uint))
     (begin
@@ -109,15 +115,13 @@
         (asserts! (is-token-contract-owner) ERR_OWNER_ONLY)
         (asserts! (not (is-address-blacklisted recipient-address)) ERR_BLACKLISTED)
         (asserts! (> mint-amount u0) ERR_INVALID_AMOUNT)
-        (try! (process-token-mint recipient-address mint-amount))
-        (ok true)))
+        (process-token-mint recipient-address mint-amount)))
 
 (define-public (burn-existing-tokens (burn-amount uint))
     (begin
         (asserts! (validate-token-transfer tx-sender burn-amount) ERR_INSUFFICIENT_BALANCE)
         (asserts! (not (var-get contract-paused-state)) ERR_CONTRACT_PAUSED)
-        (try! (process-token-burn tx-sender burn-amount))
-        (ok true)))
+        (process-token-burn tx-sender burn-amount)))
 
 (define-public (add-address-to-blacklist (target-address principal))
     (begin
@@ -144,29 +148,33 @@
 (define-private (process-token-transfer (sender-address principal) (recipient-address principal) (transfer-amount uint))
     (let ((sender-current-balance (default-to u0 (map-get? token-holder-balances sender-address)))
           (recipient-current-balance (default-to u0 (map-get? token-holder-balances recipient-address))))
-        (map-set token-holder-balances sender-address (- sender-current-balance transfer-amount))
-        (map-set token-holder-balances recipient-address (+ recipient-current-balance transfer-amount))
-        (ok true)))
+        (begin
+            (map-set token-holder-balances sender-address (- sender-current-balance transfer-amount))
+            (map-set token-holder-balances recipient-address (+ recipient-current-balance transfer-amount))
+            (ok true))))
 
 (define-private (process-token-mint (recipient-address principal) (mint-amount uint))
     (let ((recipient-current-balance (default-to u0 (map-get? token-holder-balances recipient-address)))
           (current-total-supply (var-get token-total-supply)))
-        (map-set token-holder-balances recipient-address (+ recipient-current-balance mint-amount))
-        (var-set token-total-supply (+ current-total-supply mint-amount))
-        (ok true)))
+        (begin
+            (map-set token-holder-balances recipient-address (+ recipient-current-balance mint-amount))
+            (var-set token-total-supply (+ current-total-supply mint-amount))
+            (ok true))))
 
 (define-private (process-token-burn (owner-address principal) (burn-amount uint))
     (let ((owner-current-balance (default-to u0 (map-get? token-holder-balances owner-address)))
           (current-total-supply (var-get token-total-supply)))
-        (map-set token-holder-balances owner-address (- owner-current-balance burn-amount))
-        (var-set token-total-supply (- current-total-supply burn-amount))
-        (ok true)))
+        (begin
+            (map-set token-holder-balances owner-address (- owner-current-balance burn-amount))
+            (var-set token-total-supply (- current-total-supply burn-amount))
+            (ok true))))
 
 (define-private (decrease-spending-allowance (token-owner principal) (authorized-spender principal) (decrease-amount uint))
     (let ((current-allowance (default-to u0 (map-get? token-spending-allowances 
             {token-owner: token-owner, authorized-spender: authorized-spender}))))
-        (asserts! (>= current-allowance decrease-amount) ERR_INSUFFICIENT_BALANCE)
-        (map-set token-spending-allowances 
-            {token-owner: token-owner, authorized-spender: authorized-spender} 
-            (- current-allowance decrease-amount))
-        (ok true)))
+        (begin 
+            (asserts! (>= current-allowance decrease-amount) ERR_INSUFFICIENT_BALANCE)
+            (map-set token-spending-allowances 
+                {token-owner: token-owner, authorized-spender: authorized-spender} 
+                (- current-allowance decrease-amount))
+            (ok true))))
