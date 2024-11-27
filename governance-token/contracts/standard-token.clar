@@ -12,6 +12,7 @@
 (define-constant ERR_ZERO_ADDRESS (err u107))
 (define-constant ERR_INVALID_TOKEN_ID (err u108))
 (define-constant ERR_UNAUTHORIZED_ACCESS (err u109))
+(define-constant ERR_INVALID_INPUT (err u110))
 
 ;; Define response types
 (define-constant ERR_TRANSFER (err u200))
@@ -49,6 +50,12 @@
         (>= (default-to u0 (map-get? token-holder-balances sender-address)) transfer-amount)
         (> transfer-amount u0)))
 
+(define-private (validate-string-ascii (input (string-ascii 256)))
+    (is-eq (len input) (len (unwrap-panic (as-max-len? input u256)))))
+
+(define-private (validate-string-utf8 (input (string-utf8 256)))
+    (is-eq (len input) (len (unwrap-panic (as-max-len? input u256)))))
+
 ;; Read-Only Functions
 (define-read-only (get-token-name)
     (ok (var-get token-display-name)))
@@ -75,6 +82,9 @@
 (define-public (initialize-token (display-name (string-ascii 32)) (trading-symbol (string-ascii 10)) (decimal-places uint))
     (begin
         (asserts! (is-token-contract-owner) ERR_OWNER_ONLY)
+        (asserts! (validate-string-ascii display-name) ERR_INVALID_INPUT)
+        (asserts! (validate-string-ascii trading-symbol) ERR_INVALID_INPUT)
+        (asserts! (<= decimal-places u255) ERR_INVALID_INPUT)
         (var-set token-display-name display-name)
         (var-set token-trading-symbol trading-symbol)
         (var-set token-decimal-places decimal-places)
@@ -106,8 +116,9 @@
         (asserts! (not (is-address-blacklisted tx-sender)) ERR_BLACKLISTED)
         (asserts! (not (is-address-blacklisted authorized-spender)) ERR_BLACKLISTED)
         (asserts! (not (var-get contract-paused-state)) ERR_CONTRACT_PAUSED)
-        (map-set token-spending-allowances {token-owner: tx-sender, authorized-spender: authorized-spender} approved-amount)
-        (ok true)))
+        (asserts! (not (is-eq tx-sender authorized-spender)) ERR_UNAUTHORIZED_ACCESS)
+        (asserts! (or (is-eq approved-amount u0) (> approved-amount u0)) ERR_INVALID_AMOUNT)
+        (ok (map-set token-spending-allowances {token-owner: tx-sender, authorized-spender: authorized-spender} approved-amount))))
 
 ;; Admin Functions
 (define-public (mint-new-tokens (recipient-address principal) (mint-amount uint))
@@ -127,22 +138,24 @@
     (begin
         (asserts! (is-token-contract-owner) ERR_OWNER_ONLY)
         (asserts! (not (is-eq target-address TOKEN_CONTRACT_OWNER)) ERR_UNAUTHORIZED_ACCESS)
-        (map-set blacklisted-addresses target-address true)
-        (ok true)))
+        (ok (map-set blacklisted-addresses target-address true))))
 
 (define-public (remove-address-from-blacklist (target-address principal))
     (begin
         (asserts! (is-token-contract-owner) ERR_OWNER_ONLY)
-        (map-delete blacklisted-addresses target-address)
-        (ok true)))
+        (asserts! (is-some (map-get? blacklisted-addresses target-address)) ERR_INVALID_INPUT)
+        (ok (map-delete blacklisted-addresses target-address))))
 
 (define-public (set-token-metadata (token-id uint) (metadata-name (string-ascii 64)) (metadata-description (string-ascii 256)) (metadata-uri (string-utf8 256)))
     (begin
         (asserts! (is-token-contract-owner) ERR_OWNER_ONLY)
-        (map-set token-metadata-records 
+        (asserts! (validate-string-ascii metadata-name) ERR_INVALID_INPUT)
+        (asserts! (validate-string-ascii metadata-description) ERR_INVALID_INPUT)
+        (asserts! (validate-string-utf8 metadata-uri) ERR_INVALID_INPUT)
+        (asserts! (> token-id u0) ERR_INVALID_TOKEN_ID)
+        (ok (map-set token-metadata-records 
             {token-identifier: token-id} 
-            {token-name: metadata-name, token-description: metadata-description, token-uri: metadata-uri})
-        (ok true)))
+            {token-name: metadata-name, token-description: metadata-description, token-uri: metadata-uri}))))
 
 ;; Helper Functions
 (define-private (process-token-transfer (sender-address principal) (recipient-address principal) (transfer-amount uint))
